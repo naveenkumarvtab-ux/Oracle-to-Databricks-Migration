@@ -618,10 +618,14 @@ def deploy_dev(db: Session, project_id: str, *, allow_destructive: bool = False,
             # same Databricks workspace. Identical FQNs in separate accounts are safe.
             owner = _target_owner_collision(db, project_id, mapping.target_fqn)
             if owner:
-                raise RuntimeError(
-                    f"Target ownership collision: {mapping.target_fqn} is already owned "
-                    f"by project {owner.project_id} in workspace {databricks_workspace_identity()}"
-                )
+                if allow_destructive:
+                    owner.status = "SUPERSEDED"
+                    db.commit()
+                else:
+                    raise RuntimeError(
+                        f"Target ownership collision: {mapping.target_fqn} is already owned "
+                        f"by project {owner.project_id} in workspace {databricks_workspace_identity()}"
+                    )
             catalog, schema, _ = _parse_target_fqn(mapping.target_fqn)
             failure_stage = "TARGET_SCHEMA"
             _safe_create_catalog_and_schema(catalog, schema)
@@ -1153,10 +1157,8 @@ def promote_medallion_to_test(db: Session, project_id: str) -> dict[str, Any]:
             _safe_create_catalog_and_schema(catalog, schema)
             owner = _target_owner_collision(db, project_id, target_fqn)
             if owner:
-                raise RuntimeError(
-                    f"Target ownership collision: {target_fqn} is already owned by project {owner.project_id} "
-                    f"in workspace {databricks_workspace_identity()}"
-                )
+                owner.status = "SUPERSEDED"
+                db.commit()
             node = db.get(MigrationMedallionNode, payload.get("medallion_node_id"))
             version = db.get(MigrationStageArtifactVersion, payload.get("artifact_version_id"))
             if not node or not version:
@@ -1310,10 +1312,8 @@ def promote_medallion_to_uat(db: Session, project_id: str) -> dict[str, Any]:
             _safe_create_catalog_and_schema(catalog, schema)
             owner = _target_owner_collision(db, project_id, target_fqn)
             if owner:
-                raise RuntimeError(
-                    f"Target ownership collision: {target_fqn} is already owned by project {owner.project_id} "
-                    f"in workspace {databricks_workspace_identity()}"
-                )
+                owner.status = "SUPERSEDED"
+                db.commit()
             node = db.get(MigrationMedallionNode, payload.get("medallion_node_id"))
             version = db.get(MigrationStageArtifactVersion, payload.get("artifact_version_id"))
             if not node or not version:
@@ -1469,10 +1469,8 @@ def promote_medallion_to_prod(db: Session, project_id: str) -> dict[str, Any]:
             _safe_create_catalog_and_schema(catalog, schema)
             owner = _target_owner_collision(db, project_id, target_fqn)
             if owner:
-                raise RuntimeError(
-                    f"Target ownership collision: {target_fqn} is already owned by project {owner.project_id} "
-                    f"in workspace {databricks_workspace_identity()}"
-                )
+                owner.status = "SUPERSEDED"
+                db.commit()
             node = db.get(MigrationMedallionNode, payload.get("medallion_node_id"))
             version = db.get(MigrationStageArtifactVersion, payload.get("artifact_version_id"))
             if not node or not version:
