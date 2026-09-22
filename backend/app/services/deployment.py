@@ -385,8 +385,15 @@ def _apply_table_schema_policy(db: Session, project_id: str, obj: MigrationObjec
 
 def _source_connection_string(src: MigrationSource) -> str:
     cfg = get_settings()
-    st = (cfg.source_type or "MYSQL").upper()
-    if st == "MYSQL" or cfg.mysql_host:
+    st = (cfg.source_type or "ORACLE").upper()
+    if st == "ORACLE" or (cfg.oracle_host and not cfg.mysql_host and not cfg.postgres_host and not cfg.sqlserver_host):
+        host = cfg.oracle_host or src.server_name or "localhost"
+        port = cfg.oracle_port or 1521
+        db = src.database_name or cfg.oracle_service_name or cfg.oracle_sid or "ORCLPDB1"
+        user = cfg.oracle_username or "system"
+        pwd = cfg.oracle_password or ""
+        return f"oracle://{user}:{pwd}@{host}:{port}/{db}"
+    elif st == "MYSQL" or cfg.mysql_host:
         host = cfg.mysql_host or src.server_name or "localhost"
         port = cfg.mysql_port or 3306
         db = src.database_name or cfg.mysql_database or ""
@@ -416,8 +423,20 @@ def _source_rows(src, obj, cols, sql_text, max_rows):
             yield stream
     else:
         cfg = get_settings()
-        st = (cfg.source_type or "MYSQL").upper()
-        if st == "MYSQL" or (cfg.mysql_host and not cfg.postgres_host and not cfg.sqlserver_host):
+        st = (cfg.source_type or "ORACLE").upper()
+        if st == "ORACLE" or (cfg.oracle_host and not cfg.mysql_host and not cfg.postgres_host and not cfg.sqlserver_host):
+            from app.services.discovery import parse_oracle_conn, _get_oracle_connection
+            conn_url = _source_connection_string(src)
+            conn_dict = parse_oracle_conn(conn_url)
+            conn = _get_oracle_connection(conn_dict)
+            try:
+                cursor = conn.cursor()
+                cursor.execute(sql_text)
+                yield cursor
+            finally:
+                if hasattr(conn, "close"):
+                    conn.close()
+        elif st == "MYSQL" or (cfg.mysql_host and not cfg.postgres_host and not cfg.sqlserver_host):
             from app.services.discovery import parse_mysql_conn, _get_mysql_connection
             conn_url = _source_connection_string(src)
             conn_dict = parse_mysql_conn(conn_url)
@@ -483,12 +502,20 @@ def load_bronze_table(db: Session, project_id: str, obj: MigrationObject, mappin
         return {"status": "PASSED", "rows": 0}
 
     cfg = get_settings()
-    st = (cfg.source_type or "MYSQL").upper()
-    is_mysql = st == "MYSQL" or (cfg.mysql_host and not cfg.postgres_host and not cfg.sqlserver_host)
-    is_pg = st in {"POSTGRESQL", "POSTGRES"} or (cfg.postgres_host and not cfg.sqlserver_host and not cfg.mysql_host)
-    source_type_label = "MYSQL" if is_mysql else ("POSTGRESQL" if is_pg else "SQLSERVER")
+    st = (cfg.source_type or "ORACLE").upper()
+    is_oracle = st == "ORACLE" or (cfg.oracle_host and not cfg.mysql_host and not cfg.postgres_host and not cfg.sqlserver_host)
+    is_mysql = st == "MYSQL" or (cfg.mysql_host and not cfg.postgres_host and not cfg.sqlserver_host and not cfg.oracle_host)
+    is_pg = st in {"POSTGRESQL", "POSTGRES"} or (cfg.postgres_host and not cfg.sqlserver_host and not cfg.mysql_host and not cfg.oracle_host)
+    source_type_label = "ORACLE" if is_oracle else ("MYSQL" if is_mysql else ("POSTGRESQL" if is_pg else "SQLSERVER"))
     select_cols = ",".join(source_select_expression(c, source_type_label) for c in cols)
-    if is_mysql:
+    if is_oracle:
+        clean_schema = obj.schema_name.replace('"', '""') if obj.schema_name else ""
+        clean_obj = obj.object_name.replace('"', '""')
+        source_table = f'"{clean_schema}"."{clean_obj}"' if clean_schema else f'"{clean_obj}"'
+        sql_text = f"SELECT {select_cols} FROM {source_table}"
+        if max_rows:
+            sql_text += f" FETCH FIRST {int(max_rows)} ROWS ONLY"
+    elif is_mysql:
         clean_schema = obj.schema_name.replace('`', '``') if obj.schema_name else ""
         clean_obj = obj.object_name.replace('`', '``')
         source_table = f"`{clean_schema}`.`{clean_obj}`" if clean_schema else f"`{clean_obj}`"
@@ -770,8 +797,23 @@ def _source_table_count(source: MigrationSource, obj: MigrationObject) -> int:
     if connector_info(source.id)["mode"] == "CONNECTOR":
         return int(connector_request(source.id, "count", {"schema": obj.schema_name, "table": obj.object_name})["count"])
     cfg = get_settings()
-    st = (cfg.source_type or "MYSQL").upper()
-    if st == "MYSQL" or (cfg.mysql_host and not cfg.postgres_host and not cfg.sqlserver_host):
+    st = (cfg.source_type or "ORACLE").upper()
+    if st == "ORACLE" or (cfg.oracle_host and not cfg.mysql_host and not cfg.postgres_host and not cfg.sqlserver_host):
+        from app.services.discovery import parse_oracle_conn, _get_oracle_connection
+        conn_url = _source_connection_string(source)
+        conn_dict = parse_oracle_conn(conn_url)
+        conn = _get_oracle_connection(conn_dict)
+        try:
+            cur = conn.cursor()
+            clean_schema = obj.schema_name.replace('"', '""') if obj.schema_name else ""
+            clean_obj = obj.object_name.replace('"', '""')
+            tbl_name = f'"{clean_schema}"."{clean_obj}"' if clean_schema else f'"{clean_obj}"'
+            cur.execute(f"SELECT COUNT(*) FROM {tbl_name}")
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            conn.close()
+    elif st == "MYSQL" or (cfg.mysql_host and not cfg.postgres_host and not cfg.sqlserver_host):
         from app.services.discovery import parse_mysql_conn, _get_mysql_connection
         conn_url = _source_connection_string(source)
         conn_dict = parse_mysql_conn(conn_url)

@@ -266,6 +266,21 @@ WHERE o.is_ms_shipped=0 AND o.type IN ('P','FN','IF','TF');
 
 def connection_diagnostic(error: Exception) -> str:
     message = str(error).lower()
+    # Oracle specific diagnostics
+    if "ora-01017" in message or "invalid username/password" in message:
+        return "AUTHENTICATION_FAILED: Verify Oracle username and password."
+    if "ora-12541" in message or "no listener" in message or "tns:no listener" in message:
+        return "NETWORK_UNREACHABLE: No Oracle TNS listener found. Verify Oracle is running on host/port (default: 1521)."
+    if "ora-12514" in message or "listener does not currently know of service" in message:
+        return "DATABASE_ACCESS: TNS listener does not recognize the service name. Verify service_name in connection config."
+    if "ora-12505" in message or "listener could not resolve sid" in message:
+        return "DATABASE_ACCESS: TNS listener could not resolve SID. Verify SID in connection config."
+    if "ora-12170" in message or "tns:connect timeout occurred" in message:
+        return "NETWORK_UNREACHABLE: Oracle connection timeout expired. Verify host, port, and network reachability."
+    if "ora-00942" in message or "table or view does not exist" in message:
+        return "PERMISSION_ERROR: Oracle table/view does not exist or user lacks SELECT privileges on data dictionary."
+    if "dpyp-4011" in message or "dpyp-4000" in message:
+        return "AUTHENTICATION_FAILED: Oracle connection parameters error. Verify host, port, service name / SID, and user credentials."
     # MySQL specific diagnostics
     if "1045" in message or "access denied for user" in message:
         return "AUTHENTICATION_FAILED: Verify MySQL username and password."
@@ -293,6 +308,506 @@ def connection_diagnostic(error: Exception) -> str:
     if "im002" in message or "driver" in message and ("not found" in message or "can't open" in message):
         return "DRIVER_MISSING: Install required driver."
     return f"SOURCE_OPERATION_FAILED: {str(error)}"
+
+
+# ==============================================================================
+# ORACLE DISCOVERY IMPLEMENTATION
+# ==============================================================================
+
+def parse_oracle_conn(conn_info: Any) -> dict:
+    if isinstance(conn_info, dict):
+        cfg = dict(conn_info)
+        if "username" in cfg and "user" not in cfg:
+            cfg["user"] = cfg.pop("username")
+        if "dbname" in cfg and "service_name" not in cfg and "sid" not in cfg:
+            cfg["service_name"] = cfg.pop("dbname")
+        if "database" in cfg and "service_name" not in cfg and "sid" not in cfg:
+            cfg["service_name"] = cfg.pop("database")
+        if "port" in cfg:
+            try:
+                cfg["port"] = int(cfg["port"])
+            except (ValueError, TypeError):
+                cfg["port"] = 1521
+        else:
+            cfg["port"] = 1521
+        return cfg
+    s = str(conn_info).strip()
+    if s.startswith("oracle://") or s.startswith("oracle+oracledb://") or s.startswith("oracle+cx_oracle://"):
+        u = urlparse(s)
+        q = parse_qs(u.query)
+        sid = q.get("sid", [None])[0]
+        service_name = q.get("service_name", [None])[0]
+        schema = q.get("schema", [None])[0]
+        path_clean = u.path.lstrip("/") if u.path else ""
+        if not service_name and not sid and path_clean:
+            service_name = path_clean
+        return {
+            "host": u.hostname or "localhost",
+            "port": int(u.port or 1521),
+            "service_name": service_name,
+            "sid": sid,
+            "schema": schema,
+            "user": u.username or "system",
+            "password": u.password or "",
+        }
+    parts = s.split()
+    out = {}
+    for p in parts:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            out[k.strip().lower()] = v.strip()
+    if "port" in out:
+        try:
+            out["port"] = int(out["port"])
+        except (ValueError, TypeError):
+            out["port"] = 1521
+    else:
+        out["port"] = 1521
+    if "username" in out and "user" not in out:
+        out["user"] = out.pop("username")
+    if "dbname" in out and "service_name" not in out and "sid" not in out:
+        out["service_name"] = out.pop("dbname")
+    if "database" in out and "service_name" not in out and "sid" not in out:
+        out["service_name"] = out.pop("database")
+    return out
+
+
+def _get_oracle_connection(cfg: dict):
+    try:
+        import oracledb
+    except ImportError as e:
+        raise RuntimeError("python-oracledb is required for Oracle connectivity. Install with: pip install oracledb") from e
+
+    user = cfg.get("user") or cfg.get("username") or "system"
+    password = cfg.get("password") or ""
+    host = cfg.get("host") or "localhost"
+    port = int(cfg.get("port", 1521))
+    service_name = cfg.get("service_name")
+    sid = cfg.get("sid")
+    dsn = cfg.get("dsn")
+
+    if dsn:
+        return oracledb.connect(user=user, password=password, dsn=dsn)
+
+    target_name = service_name or sid or "ORCLPDB1"
+
+    # Try connecting via Service Name first
+    if service_name or not sid:
+        dsn_service = f"{host}:{port}/{target_name}"
+        try:
+            return oracledb.connect(user=user, password=password, dsn=dsn_service)
+        except Exception as e:
+            err_msg = str(e).lower()
+            # If listener doesn't know service name, try SID fallback
+            if "ora-12514" in err_msg or "listener does not currently know of service" in err_msg:
+                try:
+                    dsn_sid = oracledb.makedsn(host, port, sid=target_name)
+                    return oracledb.connect(user=user, password=password, dsn=dsn_sid)
+                except Exception:
+                    pass
+            raise e
+    else:
+        # Try connecting via SID first
+        dsn_sid = oracledb.makedsn(host, port, sid=target_name)
+        try:
+            return oracledb.connect(user=user, password=password, dsn=dsn_sid)
+        except Exception as e:
+            err_msg = str(e).lower()
+            # If listener can't resolve SID, try Service Name fallback
+            if "ora-12505" in err_msg or "listener could not resolve sid" in err_msg:
+                try:
+                    dsn_service = f"{host}:{port}/{target_name}"
+                    return oracledb.connect(user=user, password=password, dsn=dsn_service)
+                except Exception:
+                    pass
+            raise e
+
+
+def test_oracle_connection(conn_info: Any) -> dict[str, Any]:
+    cfg = parse_oracle_conn(conn_info)
+    try:
+        conn = _get_oracle_connection(cfg)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT SYS_CONTEXT('USERENV', 'DB_NAME'), SYS_CONTEXT('USERENV', 'SERVER_HOST'), SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') FROM DUAL")
+                row = cur.fetchone()
+                db_name = row[0] if row and row[0] else (cfg.get("service_name") or cfg.get("sid") or "")
+                server_addr = row[1] if row and row[1] else cfg.get("host", "localhost")
+                schema_name = row[2] if row and row[2] else ""
+                version = f"Oracle {conn.version}" if hasattr(conn, 'version') else "Oracle Database"
+                return {
+                    "ok": True,
+                    "server": server_addr or "localhost",
+                    "database": db_name or schema_name or "Oracle",
+                    "schema": schema_name,
+                    "product_version": version,
+                }
+        finally:
+            conn.close()
+    except Exception as e:
+        raise RuntimeError(connection_diagnostic(e)) from e
+
+
+def discover_oracle(conn_info: Any) -> dict[str, Any]:
+    cfg = parse_oracle_conn(conn_info)
+    target_schema = (cfg.get("schema") or "").upper()
+    try:
+        conn = _get_oracle_connection(cfg)
+        try:
+            with conn.cursor() as cur:
+                excluded_schemas = (
+                    "'SYS', 'SYSTEM', 'OUTLN', 'DBSNMP', 'APPQOSSYS', 'CTXSYS', "
+                    "'XDB', 'WMSYS', 'MDSYS', 'ORDSYS', 'ORDDATA', 'OJVMSYS', "
+                    "'LBACSYS', 'GSMADMIN_INTERNAL', 'AUDSYS', 'ANONYMOUS', "
+                    "'DIP', 'FLOWS_FILES', 'GSMUSER', 'MGMT_VIEW', 'ORACLE_OCM', "
+                    "'OWBSYS', 'SI_INFORMTN_SCHEMA', 'SPATIAL_CSW_ADMIN_USR', "
+                    "'SPATIAL_WFS_ADMIN_USR', 'XS$NULL', 'DVSYS', 'DVF', "
+                    "'REMOTE_SCHEDULER_AGENT', 'ORDPLUGINS', 'PUBLIC', "
+                    "'OLAPSYS', 'VECSYS', 'DBSFWUSER', 'GGSHAREDCAP', 'GGSYS', "
+                    "'SYS$UMF', 'APEX_PUBLIC_USER', 'ORDS_PUBLIC_USER', 'ORDS_METADATA'"
+                )
+
+                if target_schema:
+                    owner_where = "UPPER(OWNER) = :owner"
+                    c_owner_where = "UPPER(c.OWNER) = :owner"
+                    owner_args = {"owner": target_schema}
+                else:
+                    owner_where = f"OWNER NOT IN ({excluded_schemas})"
+                    c_owner_where = f"c.OWNER NOT IN ({excluded_schemas})"
+                    owner_args = {}
+
+                def _fetch_objs(where_clause, args):
+                    cur.execute(f"""
+                        SELECT 
+                            SYS_CONTEXT('USERENV', 'DB_NAME') AS database_name,
+                            OWNER AS schema_name,
+                            TABLE_NAME AS object_name,
+                            'TABLE' AS object_type,
+                            NULL AS definition
+                        FROM ALL_TABLES
+                        WHERE {where_clause}
+                        UNION ALL
+                        SELECT 
+                            SYS_CONTEXT('USERENV', 'DB_NAME') AS database_name,
+                            OWNER AS schema_name,
+                            VIEW_NAME AS object_name,
+                            'VIEW' AS object_type,
+                            TEXT AS definition
+                        FROM ALL_VIEWS
+                        WHERE {where_clause}
+                        UNION ALL
+                        SELECT 
+                            SYS_CONTEXT('USERENV', 'DB_NAME') AS database_name,
+                            OWNER AS schema_name,
+                            OBJECT_NAME AS object_name,
+                            OBJECT_TYPE AS object_type,
+                            NULL AS definition
+                        FROM ALL_PROCEDURES
+                        WHERE {where_clause}
+                          AND OBJECT_TYPE IN ('PROCEDURE', 'FUNCTION', 'PACKAGE')
+                          AND PROCEDURE_NAME IS NULL
+                        UNION ALL
+                        SELECT 
+                            SYS_CONTEXT('USERENV', 'DB_NAME') AS database_name,
+                            OWNER AS schema_name,
+                            TRIGGER_NAME AS object_name,
+                            'TRIGGER' AS object_type,
+                            TRIGGER_BODY AS definition
+                        FROM ALL_TRIGGERS
+                        WHERE {where_clause}
+                    """, args)
+                    return cur.fetchall()
+
+                obj_rows = _fetch_objs(owner_where, owner_args)
+                # If target schema returned 0 objects, discover all non-system user schemas
+                if not obj_rows and target_schema:
+                    owner_where = f"OWNER NOT IN ({excluded_schemas})"
+                    c_owner_where = f"c.OWNER NOT IN ({excluded_schemas})"
+                    owner_args = {}
+                    obj_rows = _fetch_objs(owner_where, owner_args)
+                # Fetch routine/procedure definitions from ALL_SOURCE
+                source_defs: dict[tuple[str, str], list[str]] = {}
+                try:
+                    cur.execute(f"""
+                        SELECT OWNER, NAME, TYPE, LINE, TEXT
+                        FROM ALL_SOURCE
+                        WHERE {owner_where}
+                        ORDER BY OWNER, NAME, TYPE, LINE
+                    """, owner_args)
+                    for s_owner, s_name, s_type, s_line, s_text in cur.fetchall():
+                        source_defs.setdefault((s_owner, s_name), []).append(s_text or "")
+                except Exception:
+                    pass
+
+                objs = []
+                for r in obj_rows:
+                    schema_name = r[1]
+                    object_name = r[2]
+                    object_type = r[3]
+                    definition = str(r[4]) if r[4] is not None else None
+                    if (not definition or definition.strip() == "") and (schema_name, object_name) in source_defs:
+                        full_source = "".join(source_defs[(schema_name, object_name)])
+                        if full_source.strip():
+                            trimmed = full_source.strip()
+                            if not trimmed.upper().startswith("CREATE"):
+                                full_source = f"CREATE OR REPLACE {trimmed}"
+                            definition = full_source
+                    objs.append({
+                        "database_name": r[0] or target_schema or "Oracle",
+                        "schema_name": schema_name,
+                        "object_name": object_name,
+                        "object_type": object_type,
+                        "definition": definition
+                    })
+
+                # 2. Columns
+                cur.execute(f"""
+                    SELECT 
+                        OWNER AS schema_name,
+                        TABLE_NAME AS object_name,
+                        COLUMN_NAME AS column_name,
+                        COLUMN_ID AS column_id,
+                        DATA_TYPE || 
+                            CASE 
+                                WHEN DATA_TYPE IN ('VARCHAR2', 'CHAR', 'NVARCHAR2', 'NCHAR') THEN '(' || DATA_LENGTH || ')'
+                                WHEN DATA_TYPE = 'NUMBER' AND DATA_PRECISION IS NOT NULL AND NVL(DATA_SCALE, 0) > 0 THEN '(' || DATA_PRECISION || ',' || DATA_SCALE || ')'
+                                WHEN DATA_TYPE = 'NUMBER' AND DATA_PRECISION IS NOT NULL THEN '(' || DATA_PRECISION || ')'
+                                ELSE ''
+                            END AS declared_data_type,
+                        DATA_TYPE AS system_data_type,
+                        0 AS is_user_defined,
+                        CHAR_LENGTH AS max_length,
+                        DATA_PRECISION AS precision_val,
+                        DATA_SCALE AS scale_val,
+                        CASE WHEN NULLABLE = 'Y' THEN 1 ELSE 0 END AS is_nullable,
+                        0 AS is_identity,
+                        0 AS is_computed,
+                        NULL AS default_definition,
+                        CHARACTER_SET_NAME AS collation_name
+                    FROM ALL_TAB_COLUMNS
+                    WHERE {owner_where}
+                    ORDER BY OWNER, TABLE_NAME, COLUMN_ID
+                """, owner_args)
+                col_rows = cur.fetchall()
+                cols = [
+                    {
+                        "schema_name": r[0], "object_name": r[1], "column_name": r[2],
+                        "column_id": r[3] or 0, "declared_data_type": r[4], "system_data_type": r[5],
+                        "is_user_defined": bool(r[6]), "max_length": r[7], "precision": r[8],
+                        "scale": r[9], "is_nullable": bool(r[10]), "is_identity": bool(r[11]),
+                        "is_computed": bool(r[12]), "default_definition": r[13], "collation_name": r[14]
+                    }
+                    for r in col_rows
+                ]
+
+                # 3. Key Constraints (Primary Key & Unique)
+                try:
+                    cur.execute(f"""
+                        SELECT 
+                            c.OWNER AS schema_name,
+                            c.TABLE_NAME AS object_name,
+                            c.CONSTRAINT_NAME AS constraint_name,
+                            CASE c.CONSTRAINT_TYPE 
+                                WHEN 'P' THEN 'PRIMARY KEY'
+                                WHEN 'U' THEN 'UNIQUE'
+                                ELSE c.CONSTRAINT_TYPE 
+                            END AS constraint_type,
+                            cc.POSITION AS key_ordinal,
+                            cc.COLUMN_NAME AS column_name
+                        FROM ALL_CONSTRAINTS c
+                        JOIN ALL_CONS_COLUMNS cc 
+                          ON c.OWNER = cc.OWNER 
+                          AND c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME 
+                          AND c.TABLE_NAME = cc.TABLE_NAME
+                        WHERE c.CONSTRAINT_TYPE IN ('P', 'U')
+                          AND {c_owner_where}
+                        ORDER BY c.OWNER, c.TABLE_NAME, c.CONSTRAINT_NAME, cc.POSITION
+                    """, owner_args)
+                    kc_rows = cur.fetchall()
+                    key_constraints = [
+                        {
+                            "schema_name": r[0], "object_name": r[1], "constraint_name": r[2],
+                            "constraint_type": r[3], "key_ordinal": r[4], "column_name": r[5]
+                        }
+                        for r in kc_rows
+                    ]
+                except Exception:
+                    key_constraints = []
+
+                # 4. Foreign Keys
+                try:
+                    cur.execute(f"""
+                        SELECT 
+                            c.OWNER AS schema_name,
+                            c.TABLE_NAME AS object_name,
+                            c.CONSTRAINT_NAME AS constraint_name,
+                            cc.POSITION AS ordinal,
+                            cc.COLUMN_NAME AS column_name,
+                            r_c.OWNER AS referenced_schema,
+                            r_c.TABLE_NAME AS referenced_object,
+                            r_cc.COLUMN_NAME AS referenced_column
+                        FROM ALL_CONSTRAINTS c
+                        JOIN ALL_CONS_COLUMNS cc 
+                          ON c.OWNER = cc.OWNER 
+                          AND c.CONSTRAINT_NAME = cc.CONSTRAINT_NAME 
+                          AND c.TABLE_NAME = cc.TABLE_NAME
+                        JOIN ALL_CONSTRAINTS r_c 
+                          ON c.R_OWNER = r_c.OWNER 
+                          AND c.R_CONSTRAINT_NAME = r_c.CONSTRAINT_NAME
+                        JOIN ALL_CONS_COLUMNS r_cc 
+                          ON r_c.OWNER = r_cc.OWNER 
+                          AND r_c.CONSTRAINT_NAME = r_cc.CONSTRAINT_NAME 
+                          AND cc.POSITION = r_cc.POSITION
+                        WHERE c.CONSTRAINT_TYPE = 'R'
+                          AND {c_owner_where}
+                        ORDER BY c.OWNER, c.TABLE_NAME, c.CONSTRAINT_NAME, cc.POSITION
+                    """, owner_args)
+                    fk_rows = cur.fetchall()
+                    foreign_keys = [
+                        {
+                            "schema_name": r[0], "object_name": r[1], "constraint_name": r[2],
+                            "ordinal": r[3], "column_name": r[4], "referenced_schema": r[5],
+                            "referenced_object": r[6], "referenced_column": r[7]
+                        }
+                        for r in fk_rows
+                    ]
+                except Exception:
+                    foreign_keys = []
+
+                # 5. Table Statistics
+                try:
+                    cur.execute(f"""
+                        SELECT 
+                            OWNER AS schema_name,
+                            TABLE_NAME AS object_name,
+                            NVL(NUM_ROWS, 0) AS approx_row_count
+                        FROM ALL_TABLES
+                        WHERE {owner_where}
+                    """, owner_args)
+                    stat_rows = cur.fetchall()
+                    table_stats = [
+                        {"schema_name": r[0], "object_name": r[1], "approx_row_count": r[2] or 0}
+                        for r in stat_rows
+                    ]
+                except Exception:
+                    table_stats = []
+
+                # 6. Dependencies
+                try:
+                    cur.execute(f"""
+                        SELECT 
+                            OWNER AS referencing_schema_name,
+                            NAME AS referencing_entity_name,
+                            REFERENCED_OWNER AS referenced_schema_name,
+                            REFERENCED_NAME AS referenced_entity_name,
+                            REFERENCED_TYPE AS referenced_type,
+                            'LOCAL' AS dependency_scope
+                        FROM ALL_DEPENDENCIES
+                        WHERE {owner_where}
+                    """, owner_args)
+                    dep_rows = cur.fetchall()
+                    deps = [
+                        {
+                            "referencing_schema_name": r[0],
+                            "referencing_entity_name": r[1],
+                            "referenced_schema_name": r[2],
+                            "referenced_entity_name": r[3],
+                            "referenced_column_name": None,
+                            "referenced_minor_id": None,
+                            "dependency_scope": r[5],
+                            "is_schema_bound_reference": False,
+                            "is_caller_dependent": False,
+                            "is_ambiguous": False,
+                        }
+                        for r in dep_rows
+                    ]
+                except Exception:
+                    deps = []
+
+            by: dict[tuple[str, str], list[dict[str, Any]]] = {(r["schema_name"], r["object_name"]): [] for r in objs}
+            for c in cols:
+                by.setdefault((c["schema_name"], c["object_name"]), []).append({
+                    "name": c["column_name"],
+                    "ordinal": c["column_id"],
+                    "type": c["declared_data_type"] or c["system_data_type"],
+                    "declared_type": c["declared_data_type"],
+                    "system_type": c["system_data_type"],
+                    "is_user_defined": c["is_user_defined"],
+                    "max_length": c["max_length"],
+                    "precision": c["precision"],
+                    "scale": c["scale"],
+                    "nullable": c["is_nullable"],
+                    "identity": c["is_identity"],
+                    "computed": c["is_computed"],
+                    "default": c["default_definition"],
+                    "collation": c["collation_name"]
+                })
+
+            dep_by: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            for d in deps:
+                dep_by.setdefault((d["referencing_schema_name"], d["referencing_entity_name"]), []).append({
+                    "server": None,
+                    "database": cfg.get("service_name") or cfg.get("sid") or target_schema,
+                    "schema": d["referenced_schema_name"],
+                    "object": d["referenced_entity_name"],
+                    "column": d["referenced_column_name"],
+                    "referenced_minor_id": d["referenced_minor_id"],
+                    "type": d["dependency_scope"],
+                    "is_schema_bound_reference": d["is_schema_bound_reference"],
+                    "is_caller_dependent": d["is_caller_dependent"],
+                    "is_ambiguous": d["is_ambiguous"]
+                })
+
+            constraint_by: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            grouped_keys: dict[tuple[str, str, str], dict[str, Any]] = {}
+            for k in key_constraints:
+                key = (k["schema_name"], k["object_name"], k["constraint_name"])
+                row = grouped_keys.setdefault(key, {
+                    "name": k["constraint_name"],
+                    "type": "PRIMARY_KEY" if str(k["constraint_type"]).upper().startswith("PRIMARY") else "UNIQUE",
+                    "columns": [],
+                })
+                row["columns"].append(k["column_name"])
+            for (sch, obj, _), row in grouped_keys.items():
+                constraint_by.setdefault((sch, obj), []).append(row)
+
+            grouped_fks: dict[tuple[str, str, str], dict[str, Any]] = {}
+            for f in foreign_keys:
+                key = (f["schema_name"], f["object_name"], f["constraint_name"])
+                row = grouped_fks.setdefault(key, {
+                    "name": f["constraint_name"],
+                    "type": "FOREIGN_KEY",
+                    "columns": [],
+                    "referenced_schema": f["referenced_schema"],
+                    "referenced_object": f["referenced_object"],
+                    "referenced_columns": [],
+                })
+                row["columns"].append(f["column_name"])
+                row["referenced_columns"].append(f["referenced_column"])
+            for (sch, obj, _), row in grouped_fks.items():
+                constraint_by.setdefault((sch, obj), []).append(row)
+
+            stats_by = {(r["schema_name"], r["object_name"]): int(r["approx_row_count"] or 0) for r in table_stats}
+
+            return {
+                "database": cfg.get("service_name") or cfg.get("sid") or (objs[0]["database_name"] if objs else target_schema),
+                "objects": [{
+                    "database": r["database_name"],
+                    "schema": r["schema_name"],
+                    "name": r["object_name"],
+                    "type": r["object_type"],
+                    "definition": r["definition"],
+                    "columns": by.get((r["schema_name"], r["object_name"]), []),
+                    "dependencies": dep_by.get((r["schema_name"], r["object_name"]), []),
+                    "parameters": [],
+                    "constraints": constraint_by.get((r["schema_name"], r["object_name"]), []),
+                    "approx_row_count": stats_by.get((r["schema_name"], r["object_name"]))
+                } for r in objs]
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        raise RuntimeError(connection_diagnostic(e)) from e
 
 
 # ==============================================================================
@@ -1078,18 +1593,22 @@ def discover_sqlserver(connection_string: str) -> dict[str, Any]:
         raise RuntimeError(connection_diagnostic(e)) from e
 
 
-def test_source_connection(conn_info: Any, source_type: str = "MYSQL") -> dict[str, Any]:
-    st = (source_type or "MYSQL").upper()
-    if st == "MYSQL":
+def test_source_connection(conn_info: Any, source_type: str = "ORACLE") -> dict[str, Any]:
+    st = (source_type or "ORACLE").upper()
+    if st == "ORACLE":
+        return test_oracle_connection(conn_info)
+    elif st == "MYSQL":
         return test_mysql_connection(conn_info)
     elif st in {"POSTGRESQL", "POSTGRES"}:
         return test_postgres_connection(conn_info)
     return test_sqlserver_connection(conn_info)
 
 
-def discover_source(conn_info: Any, source_type: str = "MYSQL") -> dict[str, Any]:
-    st = (source_type or "MYSQL").upper()
-    if st == "MYSQL":
+def discover_source(conn_info: Any, source_type: str = "ORACLE") -> dict[str, Any]:
+    st = (source_type or "ORACLE").upper()
+    if st == "ORACLE":
+        return discover_oracle(conn_info)
+    elif st == "MYSQL":
         return discover_mysql(conn_info)
     elif st in {"POSTGRESQL", "POSTGRES"}:
         return discover_postgres(conn_info)

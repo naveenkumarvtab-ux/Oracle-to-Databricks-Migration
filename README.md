@@ -1,21 +1,21 @@
-# MySQL → Databricks AI Migration Factory
+# Oracle → Databricks AI Migration Factory
 
 **Build marker:** the UI displays `Build 2.3.0 SEMANTIC_MEDALLION_FACTORY`.
 
 ## Quick start
-1. Copy `.env.example` to `.env` and configure MySQL (`MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USERNAME`, `MYSQL_PASSWORD`) and Databricks values.
+1. Copy `.env.example` to `.env` and configure Oracle (`ORACLE_HOST`, `ORACLE_PORT`, `ORACLE_SERVICE_NAME`, `ORACLE_USERNAME`, `ORACLE_PASSWORD`, `ORACLE_SCHEMA`) and Databricks values.
 2. Backend: `python -m uvicorn app.main:app --host 127.0.0.1 --port 8010` (or `scripts\run_backend.bat`). API: `http://127.0.0.1:8010`; Swagger: `http://127.0.0.1:8010/docs`.
 3. Frontend: `npm run dev` in `frontend/`. Web UI: `http://localhost:5173`.
 4. Create the first administrator with `python scripts\bootstrap_admin.py` or through the login UI.
 
-# MySQL → Databricks AI Migration Factory — Enterprise Edition
+# Oracle → Databricks AI Migration Factory — Enterprise Edition
 
-A metadata-first, project-scoped migration control plane for MySQL → Databricks. This package is intentionally configuration driven: no sample database, source schema, table name, or target catalog is required by the engine.
+A metadata-first, project-scoped migration control plane for Oracle → Databricks. This package is intentionally configuration driven: no sample database, source schema, table name, or target catalog is required by the engine.
 
 ## Included
 - FastAPI backend with canonical metadata repository and project-scoped evidence
 - React + TypeScript frontend shell with Dashboard, Medallion Design, Lifecycle and full enterprise navigation
-- Deterministic MySQL datatype conversion (`TINYINT(1) → BOOLEAN`, unsigned types, `ENUM/SET → STRING`, `BLOB → BINARY`, `DATETIME/TIMESTAMP → TIMESTAMP`)
+- Deterministic Oracle datatype conversion (`NUMBER(p, s) → BIGINT/INT/DECIMAL`, `VARCHAR2/NVARCHAR2/CLOB → STRING`, `DATE/TIMESTAMP → TIMESTAMP`, `RAW/BLOB → BINARY`, `BINARY_FLOAT → FLOAT`, `BINARY_DOUBLE → DOUBLE`)
 - Outbound local connector agent (`scripts/local_connector.py`) for secure, local-only credential handling
 - Metadata-driven Bronze/Silver/Gold recommendation engine with automatic semantic inference
 - Source snapshot hashing and drift evidence
@@ -30,7 +30,7 @@ A metadata-first, project-scoped migration control plane for MySQL → Databrick
 - Governed project-wide AI repair queue with deterministic-first conversion, bounded correction attempts, local Ollama support, automatic artifact versioning and static revalidation
 
 ## Live migration connectivity
-The package includes a production-oriented MySQL discovery adapter (`PyMySQL` / `mysql-connector-python`) and a Databricks SQL connector adapter. Live E2E execution requires reachable MySQL and Databricks credentials in your local `.env`. No credentials are committed to Git.
+The package includes a production-oriented Oracle discovery adapter (`python-oracledb` in Thin mode) and a Databricks SQL connector adapter. Live E2E execution requires reachable Oracle and Databricks credentials in your local `.env`. No credentials are committed to Git.
 
 ## Important governance behavior
 - Explicit `project_id` is required for project evidence.
@@ -40,13 +40,13 @@ The package includes a production-oriented MySQL discovery adapter (`PyMySQL` / 
 - PROD destructive changes are not automatically retried or auto-approved.
 - Missing mappings/columns must block dependent deployment rather than silently producing invalid SQL.
 
-## Running live MySQL discovery
+## Running live Oracle discovery
 1. Create/select a project in the UI.
-2. In **Sources**, add your MySQL host (e.g. `localhost`), database name, and port (`3306`).
-3. Start the local connector in PowerShell: `python scripts/local_connector.py --url 'http://127.0.0.1:8010' --source '<SOURCE_ID>' --server 'localhost' --database '<DB_NAME>' --port '3306'`.
+2. In **Sources**, add your Oracle host (e.g. `localhost`), service name / schema, and port (`1521`).
+3. Start the local connector in PowerShell: `python scripts/local_connector.py --url 'http://127.0.0.1:8010' --source '<SOURCE_ID>' --server 'localhost' --database '<SERVICE_OR_SCHEMA>' --port '1521' --source-type 'oracle'`.
 4. In **Sources** or **Discovery**, click **Test connection** and **Run discovery**.
 5. Only after the connection test passes, click **Run discovery**.
-6. If it fails, the UI displays the backend's recommended action. Also use **Administration -> Run diagnostics** to see installed ODBC driver names and the selected auth mode.
+6. If it fails, the UI displays the backend's recommended action.
 
 For a named local SQL Server instance, use e.g. `localhost\\SQLEXPRESS` or the actual server/instance name rather than plain `localhost` if your SQL Server is not the default instance.
 

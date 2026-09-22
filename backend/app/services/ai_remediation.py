@@ -37,7 +37,7 @@ from .engine import (
     static_validate,
     uid,
 )
-from .rules import map_sqlserver_type, rewrite_common_tsql, rewrite_tsql_concat, rewrite_recursive_cte
+from .rules import map_sqlserver_type, rewrite_common_tsql, rewrite_common_oracle, rewrite_tsql_concat, rewrite_recursive_cte
 
 
 REMEDIABLE_ISSUE_TYPES = {
@@ -436,7 +436,7 @@ def validate_candidate_content(o: MigrationObject, m: MigrationMapping, candidat
 
 
 def _extract_definition_parameters(definition: str) -> list[dict[str, Any]]:
-    m = re.search(r"(?is)\bCREATE\s+(?:OR\s+REPLACE\s+|OR\s+ALTER\s+)?FUNCTION\s+[^\(]+\((.*?)\)\s*RETURNS?", definition or "")
+    m = re.search(r"(?is)\bCREATE\s+(?:OR\s+REPLACE\s+|OR\s+ALTER\s+)?(?:FUNCTION|PROCEDURE)\s+[^\(]+\((.*?)\)", definition or "")
     if not m:
         return []
     raw_params = m.group(1).strip()
@@ -446,7 +446,7 @@ def _extract_definition_parameters(definition: str) -> list[dict[str, Any]]:
     tokens = re.split(r",(?![^\(]*\))", raw_params)
     for i, token in enumerate(tokens, 1):
         token = token.strip()
-        pm = re.match(r"@?([A-Za-z_]\w*)\s+([A-Za-z_]\w*(?:\s*\([^)]*\))?)", token)
+        pm = re.match(r"@?([A-Za-z_]\w*)(?:\s+(?:IN\s+OUT|IN|OUT))?\s+([A-Za-z_]\w*(?:\s*\([^)]*\))?)", token, flags=re.I)
         if pm:
             name = "@" + pm.group(1)
             dtype = pm.group(2).strip()
@@ -569,9 +569,11 @@ def _deterministic_procedure_remediation(
 ) -> RemediationCandidate | None:
     definition = o.definition or ""
     params = _routine_parameters(db, project_id, o.id)
+    if not params:
+        params = _extract_definition_parameters(definition)
     sig = _parameter_signature(params, procedure=True)
     body = _clean_routine_body(definition)
-    body = _replace_parameters(rewrite_common_tsql(body), params)
+    body = _replace_parameters(rewrite_common_oracle(rewrite_common_tsql(body)), params)
     body = _replace_known_references(db, project_id, environment, body)
     body = _rewrite_static_procedure_calls(body)
 

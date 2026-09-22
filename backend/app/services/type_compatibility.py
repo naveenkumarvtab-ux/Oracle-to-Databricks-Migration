@@ -28,23 +28,25 @@ from uuid import UUID
 from .rules import map_sqlserver_type
 
 
-BINARY_SOURCE_TYPES = {"binary", "varbinary", "image", "timestamp", "rowversion", "bytea", "blob", "tinyblob", "mediumblob", "longblob"}
+BINARY_SOURCE_TYPES = {"binary", "varbinary", "image", "timestamp", "rowversion", "bytea", "blob", "tinyblob", "mediumblob", "longblob", "raw", "long raw"}
 INTEGER_SOURCE_TYPES = {
     "bigint", "int", "integer", "mediumint", "smallint", "tinyint", "year",
     "int2", "int4", "int8", "serial", "bigserial", "smallserial",
     "serial2", "serial4", "serial8"
 }
-FLOAT_SOURCE_TYPES = {"float", "float4", "float8", "real", "double precision", "double"}
+FLOAT_SOURCE_TYPES = {"float", "float4", "float8", "real", "double precision", "double", "binary_float", "binary_double"}
 DECIMAL_SOURCE_TYPES = {"decimal", "numeric", "money", "smallmoney", "number", "dec", "fixed"}
 STRING_SOURCE_TYPES = {
     "char", "varchar", "character varying", "character", "text", "tinytext", "mediumtext", "longtext",
+    "varchar2", "nvarchar2", "clob", "nclob", "long", "rowid", "urowid", "bfile", "xmltype",
     "nchar", "nvarchar", "ntext", "sysname", "json", "jsonb", "citext", "name", "bpchar",
     "inet", "cidr", "macaddr", "macaddr8", "tsvector", "tsquery", "interval", "enum", "set"
 }
 DATE_SOURCE_TYPES = {"date"}
 DATETIME_SOURCE_TYPES = {
     "datetime", "datetime2", "smalldatetime", "timestamptz",
-    "timestamp with time zone", "timestamp without time zone"
+    "timestamp with time zone", "timestamp without time zone",
+    "timestamp with local time zone"
 }
 GOVERNED_TEXT_TYPES = {
     "time", "timetz", "time with time zone", "time without time zone",
@@ -180,6 +182,10 @@ def normalize_source_type(name: str | None) -> str:
     return re.sub(r"\s*\(.*\)\s*$", "", text)
 
 
+def quote_oracle_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
 def quote_mysql_identifier(name: str) -> str:
     return "`" + name.replace("`", "``") + "`"
 
@@ -192,9 +198,11 @@ def quote_sqlserver_identifier(name: str) -> str:
     return "[" + name.replace("]", "]]" ) + "]"
 
 
-def quote_identifier(name: str, source_type: str = "MYSQL") -> str:
-    st = (source_type or "MYSQL").upper()
-    if st == "MYSQL":
+def quote_identifier(name: str, source_type: str = "SQLSERVER") -> str:
+    st = (source_type or "SQLSERVER").upper()
+    if st == "ORACLE":
+        return quote_oracle_identifier(name)
+    elif st == "MYSQL":
         return quote_mysql_identifier(name)
     elif st in {"POSTGRESQL", "POSTGRES"}:
         return quote_postgres_identifier(name)
@@ -244,9 +252,12 @@ def source_select_expression(column: Any, source_type: str = "SQLSERVER") -> str
     """Return a source-side projection selected only from discovered metadata."""
     col_name = str(column.column_name)
     st = (source_type or "SQLSERVER").upper()
+    is_oracle = st == "ORACLE"
     is_mysql = st == "MYSQL"
     is_pg = st in {"POSTGRESQL", "POSTGRES"}
-    if is_mysql:
+    if is_oracle:
+        quoted_name = quote_oracle_identifier(col_name)
+    elif is_mysql:
         quoted_name = quote_mysql_identifier(col_name)
     elif is_pg:
         quoted_name = quote_postgres_identifier(col_name)
@@ -256,6 +267,8 @@ def source_select_expression(column: Any, source_type: str = "SQLSERVER") -> str
     plan = transport_plan(column.data_type, getattr(column, "precision", None), getattr(column, "scale", None))
     
     if plan.strategy == "HEX_STRING_TO_BINARY":
+        if is_oracle:
+            return f"RAWTOHEX({quoted_name}) AS {quoted_name}"
         if is_mysql:
             return f"HEX({quoted_name}) AS {quoted_name}"
         if is_pg:
@@ -263,6 +276,8 @@ def source_select_expression(column: Any, source_type: str = "SQLSERVER") -> str
         return f"CONVERT(VARCHAR(MAX), CONVERT(VARBINARY(MAX), {quoted_name}), 2) AS {quoted_name}"
     
     if plan.strategy == "UUID_STRING":
+        if is_oracle:
+            return f"TO_CHAR({quoted_name}) AS {quoted_name}"
         if is_mysql:
             return f"CAST({quoted_name} AS CHAR) AS {quoted_name}"
         if is_pg:
@@ -270,6 +285,8 @@ def source_select_expression(column: Any, source_type: str = "SQLSERVER") -> str
         return f"CONVERT(VARCHAR(36), {quoted_name}) AS {quoted_name}"
         
     if plan.strategy in {"XML_STRING", "SQL_VARIANT_STRING", "GOVERNED_TEXT_FALLBACK"}:
+        if is_oracle:
+            return f"TO_CHAR({quoted_name}) AS {quoted_name}"
         if is_mysql:
             return f"CAST({quoted_name} AS CHAR) AS {quoted_name}"
         if is_pg:
@@ -280,6 +297,8 @@ def source_select_expression(column: Any, source_type: str = "SQLSERVER") -> str
         return f"CASE WHEN {quoted_name} IS NULL THEN NULL ELSE {quoted_name}.ToString() END AS {quoted_name}"
         
     if plan.strategy == "SPATIAL_SRID_WKT_STRING":
+        if is_oracle:
+            return f"SDO_UTIL.TO_WKTGEOMETRY({quoted_name}) AS {quoted_name}"
         if is_mysql:
             return f"ST_AsText({quoted_name}) AS {quoted_name}"
         if is_pg:

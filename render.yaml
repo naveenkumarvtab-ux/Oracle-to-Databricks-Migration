@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: mysql-to-databricks-migration
+    name: oracle-to-databricks-migration
     runtime: docker
     plan: free
     region: singapore
@@ -23,7 +23,23 @@ services:
       - key: ALLOWED_ORIGINS
         value: "*"
       - key: SOURCE_TYPE
-        value: MYSQL
+        value: ORACLE
+      - key: ORACLE_HOST
+        sync: false
+      - key: ORACLE_PORT
+        value: "1521"
+      - key: ORACLE_SERVICE_NAME
+        sync: false
+      - key: ORACLE_SID
+        sync: false
+      - key: ORACLE_SCHEMA
+        sync: false
+      - key: ORACLE_USERNAME
+        sync: false
+      - key: ORACLE_PASSWORD
+        sync: false
+      - key: ORACLE_MODE
+        value: THIN
       - key: MYSQL_HOST
         sync: false
       - key: MYSQL_PORT
@@ -87,7 +103,7 @@ services:
       - key: LLM_API_KEY
         sync: false
       - key: LLM_MODEL
-        value: gemini-2.5-flash
+        value: gemini-3.6-flash
       - key: DEPLOYMENT_POLICY
         value: FAIL_ON_SCHEMA_DRIFT
       - key: DEV_SCHEMA_POLICY

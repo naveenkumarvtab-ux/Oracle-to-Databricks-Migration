@@ -45,19 +45,19 @@ export default function SourceConnectorControl({ projectId, source }: Props) {
       setError(e instanceof Error ? e.message : "Connector update failed");
     } finally { setBusy(false); }
   };
-  const [port, setPort] = useState("3306");
+  const [port, setPort] = useState("1521");
   const quote = (value: string) => "'" + value.replaceAll("'", "''") + "'";
   const backendUrl = window.location.port === "5173" ? "http://127.0.0.1:8010" : window.location.origin;
-  const command = `python scripts/local_connector.py --url ${quote(backendUrl)} --source ${quote(source.id)} --server ${quote(source.server_name)} --database ${quote(source.database_name)} --port ${quote(port)}`;
+  const command = `python scripts/local_connector.py --url ${quote(backendUrl)} --source ${quote(source.id)} --server ${quote(source.server_name)} --database ${quote(source.database_name)} --port ${quote(port)} --source-type 'oracle'`;
 
   return <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
     <span>{status === "DIRECT" ? "Direct connection" : `Connector: ${status.toLowerCase()}`}</span>
     <button onClick={() => setOpen(true)}>Manage connector</button>
-    {open && <dialog ref={dialog} aria-label="Local MySQL connector" onCancel={() => { setOpen(false); setRegistration(null); setError(""); }}
+    {open && <dialog ref={dialog} aria-label="Local Oracle connector" onCancel={() => { setOpen(false); setRegistration(null); setError(""); }}
       style={{ border: "1px solid #d6dce5", borderRadius: 8, padding: 0, width: "min(680px, 90vw)", maxHeight: "85vh" }}>
       <div style={{ background: "white", color: "#172b4d", padding: 24, overflowY: "auto", whiteSpace: "normal" }}>
-        <h2>Local MySQL connector</h2>
-        <p>Run the connector on a machine that can access {source.server_name}. It connects outward to this application over HTTPS. MySQL credentials remain local.</p>
+        <h2>Local Oracle connector</h2>
+        <p>Run the connector on a machine that can access {source.server_name}. It connects outward to this application over HTTPS. Oracle credentials remain local.</p>
         <p>Status: <strong>{status}</strong></p>
         {error && <p role="alert">{error}</p>}
         {registration ? <>
@@ -69,9 +69,9 @@ export default function SourceConnectorControl({ projectId, source }: Props) {
               <input value={port} onChange={(e) => setPort(e.target.value)} style={{ width: 80, padding: "4px 8px", borderRadius: 4, border: "1px solid #c1c7d0" }} />
             </label>
           </div>
-          <p>From the updated repository folder on the MySQL source machine:</p>
+          <p>From the updated repository folder on the Oracle source machine:</p>
           <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>python -m pip install -r scripts/connector-requirements.txt{"\n"}{command}</pre>
-          <p>For MySQL Authentication add <code>--username 'root'</code>; the password is prompted securely.</p>
+          <p>For Oracle Authentication add <code>--username 'system'</code>; the password is prompted securely.</p>
           <p>Keep the connector running. When its status becomes online, close this panel and select Test. See <code>docs/LOCAL_CONNECTOR.md</code> for certificate setup and recovery.</p>
         </> : <p>Registration switches this source to connector mode. Registering again invalidates the previous token and cancels pending connector tasks.</p>}
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 16 }}>

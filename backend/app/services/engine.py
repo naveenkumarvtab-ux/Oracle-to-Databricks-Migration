@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 from app.models.entities import *
 from app.models.canonical import MigrationValidation
-from .rules import map_sqlserver_type, classify_layer, classify_procedure, classify_function, classify_trigger, rewrite_common_tsql
+from .rules import map_sqlserver_type, map_source_type, classify_layer, classify_procedure, classify_function, classify_trigger, rewrite_common_tsql, rewrite_common_oracle
 
 def uid(prefix: str) -> str: return f"{prefix}_{uuid.uuid4().hex}"
 def sha(text: str) -> str: return hashlib.sha256(text.encode()).hexdigest()
@@ -248,7 +248,7 @@ def _parameter_signature(params: list[dict], *, procedure: bool=False) -> str:
         if not raw or raw.lower() in {"@return_value","return_value"}:
             continue
         name=re.sub(r"^@+","",raw)
-        dtype=map_sqlserver_type(str(p.get("type") or "string"),p.get("precision"),p.get("scale"))
+        dtype=map_source_type(str(p.get("type") or "string"),p.get("precision"),p.get("scale"), source_type="ORACLE")
         mode="OUT " if procedure and p.get("is_output") else ("IN " if procedure else "")
         parts.append(f"{mode}{qident(name)} {dtype}")
     return ", ".join(parts)
@@ -281,22 +281,9 @@ def _replace_known_references(db: Session, project_id: str, environment: str, co
         ]
         for pat in patterns:
             out=re.sub(pat,lambda _: x.target_fqn,out,flags=re.I)
-        table_patterns=[
-            rf"(?i)(?<=\bFROM\s)\[?{re.escape(name)}\]?(?![\w`\.])",
-            rf"(?i)(?<=\bJOIN\s)\[?{re.escape(name)}\]?(?![\w`\.])",
-            rf"(?i)(?<=\bINTO\s)\[?{re.escape(name)}\]?(?![\w`\.])",
-            rf"(?i)(?<=\bUPDATE\s)\[?{re.escape(name)}\]?(?![\w`\.])",
-            rf"(?i)(?<=\bFROM\s)`{re.escape(name)}`(?![\w`\.])",
-            rf"(?i)(?<=\bJOIN\s)`{re.escape(name)}`(?![\w`\.])",
-            rf"(?i)(?<=\bINTO\s)`{re.escape(name)}`(?![\w`\.])",
-            rf"(?i)(?<=\bUPDATE\s)`{re.escape(name)}`(?![\w`\.])",
-            rf"(?i)(?<=\bFROM\s)\"{re.escape(name)}\"(?![\w`\.])",
-            rf"(?i)(?<=\bJOIN\s)\"{re.escape(name)}\"(?![\w`\.])",
-            rf"(?i)(?<=\bINTO\s)\"{re.escape(name)}\"(?![\w`\.])",
-            rf"(?i)(?<=\bUPDATE\s)\"{re.escape(name)}\"(?![\w`\.])",
-        ]
-        for pat in table_patterns:
-            out=re.sub(pat,lambda _: x.target_fqn,out)
+        for keyword in ("FROM", "JOIN", "INTO", "UPDATE"):
+            pat = rf"(?i)\b({keyword}\s+)(?:\[?{re.escape(name)}\]?|`{re.escape(name)}`|\"{re.escape(name)}\")(?![\w`\.])"
+            out = re.sub(pat, lambda m: f"{m.group(1)}{x.target_fqn}", out, flags=re.I)
     return out
 
 

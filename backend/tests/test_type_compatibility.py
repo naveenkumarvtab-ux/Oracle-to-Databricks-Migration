@@ -151,6 +151,7 @@ def test_bronze_loader_builds_binary_safe_source_and_target_sql(db, monkeypatch)
             return TargetCursor()
 
     from app.services import discovery
+    monkeypatch.setattr(discovery, "_get_oracle_connection", lambda *_a, **_k: SourceConnection())
     monkeypatch.setattr(discovery, "_get_mysql_connection", lambda *_a, **_k: SourceConnection())
     monkeypatch.setitem(sys.modules, "pyodbc", SimpleNamespace(connect=lambda *_a, **_k: SourceConnection()))
     monkeypatch.setattr(deployment, "databricks_connection", lambda: TargetConnection())
@@ -167,7 +168,8 @@ def test_bronze_loader_builds_binary_safe_source_and_target_sql(db, monkeypatch)
         replace_existing_data=False,
     )
 
-    assert ("HEX(`VersionBytes`) AS `VersionBytes`" in captured["source_sql"] or
+    assert ("RAWTOHEX(\"VersionBytes\") AS \"VersionBytes\"" in captured["source_sql"] or
+            "HEX(`VersionBytes`) AS `VersionBytes`" in captured["source_sql"] or
             "CONVERT(VARCHAR(MAX), CONVERT(VARBINARY(MAX), [VersionBytes]), 2) AS [VersionBytes]" in captured["source_sql"])
     assert "VALUES (?,unhex(?),?, current_timestamp())" in captured["insert_sql"]
     assert captured["payload"][0][0] == 7

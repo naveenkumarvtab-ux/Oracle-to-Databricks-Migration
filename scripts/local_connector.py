@@ -20,15 +20,20 @@ from app.services.discovery import (
     discover_source,
     test_source_connection,
     connection_diagnostic,
+    _get_oracle_connection,
+    parse_oracle_conn,
     _get_mysql_connection,
+    parse_mysql_conn,
 )
 from app.services.type_compatibility import source_select_expression
 
 
-def quoted(value, db_type="mysql"):
+def quoted(value, db_type="oracle"):
     if not isinstance(value, str) or not value or len(value) > 128 or "\x00" in value:
         raise ValueError("Invalid SQL identifier")
     db = str(db_type).lower()
+    if db == "oracle":
+        return '"' + value.replace('"', '""') + '"'
     if db == "mysql":
         return '`' + value.replace('`', '``') + '`'
     if db in {"postgresql", "postgres"}:
@@ -60,19 +65,26 @@ class LocalAgent:
             self.db_type = db_type.lower()
         elif is_postgres is not None:
             self.db_type = "postgresql" if is_postgres else "sqlserver"
+        elif isinstance(connection_info, dict) and ("service_name" in connection_info or "sid" in connection_info):
+            self.db_type = "oracle"
         elif isinstance(connection_info, dict) and ("dbname" in connection_info or "sslmode" in connection_info):
             self.db_type = "postgresql"
         elif isinstance(connection_info, str) and ("DRIVER=" in connection_info.upper() or "SERVER=" in connection_info.upper() or connection_info == "secret"):
             self.db_type = "sqlserver"
+        elif isinstance(connection_info, str) and ("oracle" in connection_info.lower() or "1521" in connection_info):
+            self.db_type = "oracle"
         else:
-            self.db_type = "mysql"
+            self.db_type = "oracle"
         self.streams = {}
 
     def connect(self):
-        if self.db_type == "mysql":
+        if self.db_type == "oracle":
+            if isinstance(self.connection_info, dict):
+                return _get_oracle_connection(self.connection_info)
+            return _get_oracle_connection(parse_oracle_conn(self.connection_info))
+        elif self.db_type == "mysql":
             if isinstance(self.connection_info, dict):
                 return _get_mysql_connection(self.connection_info)
-            from app.services.discovery import parse_mysql_conn
             return _get_mysql_connection(parse_mysql_conn(self.connection_info))
         elif self.db_type in {"postgresql", "postgres"}:
             import psycopg2
@@ -211,9 +223,35 @@ class LocalAgent:
                 requested = data.get("columns")
                 if not isinstance(requested, list) or not requested or any(name not in columns for name in requested):
                     raise ValueError("Source columns changed; repeat discovery before deployment")
+            elif self.db_type == "oracle":
+                cur.execute(
+                    "SELECT 1 FROM ALL_TABLES WHERE UPPER(OWNER)=:1 AND UPPER(TABLE_NAME)=:2",
+                    [schema.upper(), table.upper()],
+                )
+                if not cur.fetchone():
+                    raise ValueError(f"Source table '{schema}.{table}' not found or read permission missing")
+                if op == "count":
+                    cur.execute(f"SELECT COUNT(*) FROM {table_sql}")
+                    row = cur.fetchone()
+                    return {"count": int(row[0]) if row else 0}
+                cur.execute(
+                    "SELECT COLUMN_NAME, DATA_TYPE, DATA_PRECISION, DATA_SCALE "
+                    "FROM ALL_TAB_COLUMNS WHERE UPPER(OWNER)=:1 AND UPPER(TABLE_NAME)=:2 ORDER BY COLUMN_ID",
+                    [schema.upper(), table.upper()],
+                )
+                metadata = cur.fetchall()
+                columns = {
+                    r[0]: SimpleNamespace(
+                        column_name=r[0], data_type=r[1], precision=r[2], scale=r[3]
+                    )
+                    for r in metadata
+                }
+                requested = data.get("columns")
+                if not isinstance(requested, list) or not requested or any(name not in columns for name in requested):
+                    raise ValueError("Source columns changed; repeat discovery before deployment")
                 limit = data.get("max_rows")
-                limit_clause = f" LIMIT {int(limit)}" if limit is not None and isinstance(limit, int) and limit > 0 else ""
-                projection = ", ".join(source_select_expression(columns[name], "POSTGRESQL") for name in requested)
+                limit_clause = f" FETCH FIRST {int(limit)} ROWS ONLY" if limit is not None and isinstance(limit, int) and limit > 0 else ""
+                projection = ", ".join(source_select_expression(columns[name], "ORACLE") for name in requested)
                 cur.execute(f"SELECT {projection} FROM {table_sql}{limit_clause}")
             else:
                 found = cur.execute(
@@ -268,8 +306,11 @@ def main():
     parser.add_argument("--source", required=True)
     parser.add_argument("--server", required=True)
     parser.add_argument("--database", required=True)
-    parser.add_argument("--port", type=int, default=3306)
-    parser.add_argument("--source-type", default="mysql")
+    parser.add_argument("--port", type=int, default=1521)
+    parser.add_argument("--source-type", default="oracle")
+    parser.add_argument("--service-name", default=None)
+    parser.add_argument("--sid", default=None)
+    parser.add_argument("--schema", default=None)
     parser.add_argument("--sslmode", default=None)
     parser.add_argument("--driver", default=None)
     parser.add_argument("--username", default=None)
@@ -279,9 +320,24 @@ def main():
     base = validate_url(args.url)
     token = os.environ.get("CONNECTOR_TOKEN") or getpass.getpass("Connector registration token: ")
 
-    source_type = (args.source_type or ("sqlserver" if args.driver and "sql server" in args.driver.lower() else "mysql")).lower()
+    source_type = (args.source_type or ("sqlserver" if args.driver and "sql server" in args.driver.lower() else "oracle")).lower()
     
-    if source_type == "mysql":
+    if source_type == "oracle":
+        user = args.username or os.environ.get("ORACLE_USERNAME") or "system"
+        password = os.environ.get("CONNECTOR_ORACLE_PASSWORD") or os.environ.get("ORACLE_PASSWORD")
+        if password is None:
+            password = getpass.getpass(f"Oracle password for '{user}': ")
+        connection_info = {
+            "host": args.server,
+            "port": args.port or 1521,
+            "service_name": args.service_name or args.database,
+            "sid": args.sid,
+            "schema": args.schema or args.database,
+            "user": user,
+            "password": password,
+        }
+        db_type = "Oracle"
+    elif source_type == "mysql":
         user = args.username or os.environ.get("MYSQL_USERNAME") or "root"
         password = os.environ.get("CONNECTOR_MYSQL_PASSWORD") or os.environ.get("MYSQL_PASSWORD")
         if password is None:

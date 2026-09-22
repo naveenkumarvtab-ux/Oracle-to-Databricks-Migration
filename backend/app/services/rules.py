@@ -16,30 +16,33 @@ TYPE_MAP = {
     # Floating point & numeric
     "float": "FLOAT", "float4": "FLOAT", "float8": "DOUBLE", "real": "FLOAT",
     "double precision": "DOUBLE", "double": "DOUBLE", "dec": "DECIMAL", "fixed": "DECIMAL",
+    "binary_float": "FLOAT", "binary_double": "DOUBLE",
 
     # Character & Text Types
     "char": "STRING", "varchar": "STRING", "character varying": "STRING", "character": "STRING",
     "varchar2": "STRING", "nvarchar2": "STRING", "clob": "STRING", "nclob": "STRING",
     "text": "STRING", "tinytext": "STRING", "mediumtext": "STRING", "longtext": "STRING",
-    "nchar": "STRING", "nvarchar": "STRING", "ntext": "STRING",
+    "nchar": "STRING", "nvarchar": "STRING", "ntext": "STRING", "long": "STRING",
     "citext": "STRING", "name": "STRING", "bpchar": "STRING",
-    "enum": "STRING", "set": "STRING",
+    "enum": "STRING", "set": "STRING", "rowid": "STRING", "urowid": "STRING",
 
     # Binary types
     "blob": "BINARY", "tinyblob": "BINARY", "mediumblob": "BINARY", "longblob": "BINARY",
     "binary": "BINARY", "varbinary": "BINARY", "image": "BINARY",
+    "raw": "BINARY", "long raw": "BINARY", "bfile": "STRING",
     "bytea": "BINARY", "timestamp": "TIMESTAMP", "rowversion": "BINARY",
 
     # Date & Time types
-    "date": "DATE", "datetime": "TIMESTAMP", "datetime2": "TIMESTAMP", "smalldatetime": "TIMESTAMP",
+    "date": "TIMESTAMP", "datetime": "TIMESTAMP", "datetime2": "TIMESTAMP", "smalldatetime": "TIMESTAMP",
     "timestamptz": "TIMESTAMP", "timestamp with time zone": "TIMESTAMP",
     "timestamp without time zone": "TIMESTAMP",
+    "timestamp with local time zone": "TIMESTAMP",
     "time": "STRING", "timetz": "STRING", "time with time zone": "STRING",
     "time without time zone": "STRING", "interval": "STRING",
 
     # Specialized / Semi-structured types
     "uniqueidentifier": "STRING", "uuid": "STRING",
-    "json": "STRING", "jsonb": "STRING",
+    "json": "STRING", "jsonb": "STRING", "xmltype": "STRING",
     "xml": "STRING", "datetimeoffset": "STRING", "sysname": "STRING", "hierarchyid": "STRING",
     "inet": "STRING", "cidr": "STRING", "macaddr": "STRING", "macaddr8": "STRING",
     "tsvector": "STRING", "tsquery": "STRING",
@@ -47,6 +50,50 @@ TYPE_MAP = {
     "multipoint": "STRING", "multilinestring": "STRING", "multipolygon": "STRING",
     "geometrycollection": "STRING", "lseg": "STRING", "box": "STRING", "path": "STRING", "circle": "STRING"
 }
+
+def map_oracle_type(name: str, precision: int | None = None, scale: int | None = None) -> str:
+    raw = name.lower().strip().replace('"', '')
+    # Check for NUMBER with precision/scale
+    declared = re.fullmatch(r"([a-z0-9_ ]+)\s*\(\s*(\*|\d+)\s*(?:,\s*(\*|-?\d+)\s*)?\)", raw)
+    n = declared.group(1).strip() if declared else raw.split("(")[0].strip()
+
+    if n in {"number", "numeric", "decimal", "dec"}:
+        dec_p_str = declared.group(2) if declared else None
+        dec_p = 38 if dec_p_str == "*" else (int(dec_p_str) if dec_p_str and dec_p_str.isdigit() else precision)
+        dec_s_str = declared.group(3) if declared else None
+        dec_s = int(dec_s_str) if dec_s_str and dec_s_str != "*" and (dec_s_str.isdigit() or (dec_s_str.startswith('-') and dec_s_str[1:].isdigit())) else scale
+
+        if dec_p is not None and (dec_s is None or dec_s == 0):
+            if dec_p <= 4:
+                return "SMALLINT"
+            elif dec_p <= 9:
+                return "INT"
+            elif dec_p <= 18:
+                return "BIGINT"
+            else:
+                return f"DECIMAL({dec_p},0)"
+        elif dec_p is not None and dec_s is not None and dec_s > 0:
+            return f"DECIMAL({dec_p},{dec_s})"
+        elif dec_p is None and dec_s is None:
+            # Unconstrained NUMBER in Oracle often holds floating-point or arbitrary precision
+            return "DECIMAL(38,10)"
+        return f"DECIMAL({dec_p or 38},{dec_s or 0})"
+
+    if n in {"binary_float", "float"}:
+        return "FLOAT"
+    if n in {"binary_double", "double precision"}:
+        return "DOUBLE"
+    if n in {"date"}:
+        # Oracle DATE includes time (HH:MI:SS), so TIMESTAMP preserves data fidelity
+        return "TIMESTAMP"
+    if n in {"timestamp", "timestamp with time zone", "timestamp with local time zone"}:
+        return "TIMESTAMP"
+    if n in {"raw", "long raw", "blob"}:
+        return "BINARY"
+    if n in {"clob", "nclob", "long", "varchar2", "nvarchar2", "char", "nchar", "rowid", "urowid", "xmltype", "bfile"}:
+        return "STRING"
+
+    return TYPE_MAP.get(n, "STRING")
 
 def map_mysql_type(name: str, precision: int | None = None, scale: int | None = None) -> str:
     raw = name.lower().strip().replace('`', '').replace('"', '')
@@ -123,8 +170,15 @@ def map_sqlserver_type(name: str, precision: int | None = None, scale: int | Non
         return "BINARY"
     return map_mysql_type(name, precision, scale)
 
-def map_source_type(name: str, precision: int | None = None, scale: int | None = None) -> str:
-    return map_mysql_type(name, precision, scale)
+def map_source_type(name: str, precision: int | None = None, scale: int | None = None, source_type: str = "ORACLE") -> str:
+    st = (source_type or "ORACLE").upper()
+    if st == "ORACLE":
+        return map_oracle_type(name, precision, scale)
+    elif st == "MYSQL":
+        return map_mysql_type(name, precision, scale)
+    elif st in {"POSTGRESQL", "POSTGRES"}:
+        return map_postgres_type(name, precision, scale)
+    return map_sqlserver_type(name, precision, scale)
 
 def classify_layer(object_type: str, definition: str|None="", name: str="") -> tuple[str,float,str]:
     t = object_type.upper(); d=(definition or "").lower(); n=name.lower()
@@ -364,8 +418,37 @@ def rewrite_common_postgres(sql: str) -> str:
     return out
 
 
-def rewrite_source_sql(sql: str, source_type: str = "POSTGRESQL") -> str:
-    if source_type.upper() == "POSTGRESQL":
+def rewrite_common_oracle(sql: str) -> str:
+    """Rewrite Oracle specific SQL / PL/SQL syntax to standard Databricks SQL."""
+    if not sql:
+        return sql
+    out = rewrite_recursive_cte(sql)
+    # SYSDATE, SYSTIMESTAMP -> current_timestamp()
+    out = re.sub(r"\b(?:SYSDATE|SYSTIMESTAMP)\b", "current_timestamp()", out, flags=re.I)
+    # TRUNC(current_timestamp()) or TRUNC(date) -> to_date(...) or date_trunc
+    out = re.sub(r"\bTRUNC\s*\(\s*current_timestamp\(\)\s*\)", "current_date()", out, flags=re.I)
+    # NVL(a, b) -> coalesce(a, b)
+    out = re.sub(r"\bNVL\s*\(", "coalesce(", out, flags=re.I)
+    # NVL2(a, b, c) -> CASE WHEN a IS NOT NULL THEN b ELSE c END
+    out = re.sub(
+        r"\bNVL2\s*\(\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^)]+)\s*\)",
+        r"CASE WHEN \1 IS NOT NULL THEN \2 ELSE \3 END",
+        out,
+        flags=re.I,
+    )
+    # Double quoted identifiers "MY_COL" -> `MY_COL`
+    out = re.sub(r'"([^"]+)"', r"`\1`", out)
+    # FROM DUAL removal (Databricks supports SELECT without FROM or with DUAL)
+    # Convert ROWNUM <= N in WHERE clause to LIMIT N
+    # DECODE(e, s1, r1, def) basic replacement
+    return out
+
+
+def rewrite_source_sql(sql: str, source_type: str = "ORACLE") -> str:
+    st = (source_type or "ORACLE").upper()
+    if st == "ORACLE":
+        return rewrite_common_oracle(sql)
+    elif st in {"POSTGRESQL", "POSTGRES"}:
         return rewrite_common_postgres(sql)
     return rewrite_common_tsql(sql)
 

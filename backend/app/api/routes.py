@@ -148,8 +148,19 @@ def _dev_log_rows(db: Session, project_id: str) -> list[dict]:
 
 def _source_conn_for_source(src: MigrationSource) -> tuple[Any, str]:
     cfg = get_settings()
-    st = (cfg.source_type or "MYSQL").upper()
-    if st == "MYSQL" or (cfg.mysql_host and not cfg.postgres_host and not cfg.sqlserver_host):
+    st = (cfg.source_type or "ORACLE").upper()
+    if st == "ORACLE" or (cfg.oracle_host and not cfg.mysql_host and not cfg.postgres_host and not cfg.sqlserver_host):
+        host = cfg.oracle_host or src.server_name or "localhost"
+        port = cfg.oracle_port or 1521
+        db = src.database_name or cfg.oracle_service_name or cfg.oracle_sid or "ORCLPDB1"
+        user = cfg.oracle_username or "system"
+        pwd = cfg.oracle_password or ""
+        return {
+            "host": host, "port": port, "service_name": db,
+            "schema": cfg.oracle_schema,
+            "user": user, "password": pwd
+        }, "ORACLE"
+    if st == "MYSQL":
         host = cfg.mysql_host or src.server_name or "localhost"
         port = cfg.mysql_port or 3306
         db = src.database_name or cfg.mysql_database or ""
@@ -223,6 +234,8 @@ def sources_list(project_id:str,db:Session=Depends(get_db),_=Depends(auth)):
 def _test_source(conn: Any, stype: str) -> dict[str, Any]:
     import app.api.routes as r
     import app.services.discovery as disc
+    if getattr(r, "test_oracle_connection", None) and r.test_oracle_connection is not disc.test_oracle_connection:
+        return r.test_oracle_connection(conn)
     if getattr(r, "test_mysql_connection", None) and r.test_mysql_connection is not disc.test_mysql_connection:
         return r.test_mysql_connection(conn)
     if getattr(r, "test_sqlserver_connection", None) and r.test_sqlserver_connection is not disc.test_sqlserver_connection:

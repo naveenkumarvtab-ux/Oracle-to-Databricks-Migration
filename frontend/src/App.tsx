@@ -157,7 +157,7 @@ function Login({ done }: { done: () => void }) {
       <div className="login-card">
         <div className="brandmark">MF</div>
         <h1>Migration Factory</h1>
-        <p>Enterprise MySQL → Databricks Control Plane</p>
+        <p>Enterprise Oracle → Databricks Control Plane</p>
         <input
           value={u}
           onChange={(e) => setU(e.target.value)}
@@ -983,10 +983,10 @@ export default function App() {
     },
     {
       phase: "SETUP",
-      title: "Configure the MySQL source",
+      title: "Configure the Oracle source",
       description: "Add the source profile and verify the live connection before discovery.",
       page: "Sources",
-      action: "Configure and verify the MySQL source",
+      action: "Configure and verify the Oracle source",
       complete: sources.length > 0,
       evidence: `${sources.length} source profile${sources.length === 1 ? "" : "s"}`,
     },
@@ -1212,7 +1212,7 @@ export default function App() {
       <main>
         <header>
           <div className="header-title">
-            <div className="eyebrow">MYSQL → DATABRICKS</div>
+            <div className="eyebrow">ORACLE → DATABRICKS</div>
             <h2>{displayPage(page)}</h2>
             <p>
               Metadata-first migration orchestration with governed promotion and
@@ -1252,7 +1252,7 @@ export default function App() {
               <div className="workflow-hero">
                 <div>
                   <div className="hero-kicker"><Workflow size={15} /> Guided migration journey</div>
-                  <h1>{current?.name || "Start your MySQL migration"}</h1>
+                  <h1>{current?.name || "Start your Oracle migration"}</h1>
                   <p>
                     Follow one governed path from project setup through PROD validation, cutover and source retirement.
                     Existing migration functions remain on their original pages.
@@ -1343,7 +1343,7 @@ export default function App() {
                   </div>
                   <h1>{current?.name || "Select a migration project"}</h1>
                   <p>
-                    Discover, assess, transform, validate and promote MySQL
+                    Discover, assess, transform, validate and promote Oracle
                     workloads into governed Databricks medallion architecture.
                   </p>
                   <div className="hero-actions">
@@ -1474,7 +1474,7 @@ export default function App() {
                     <b>1. Administrator</b>
                     <span>
                       Configure .env, create admin, start backend/frontend, and
-                      verify MySQL plus Databricks connectivity.
+                      verify Oracle plus Databricks connectivity.
                     </span>
                   </div>
                   <div className="runbook-arrow">→</div>
@@ -1543,7 +1543,7 @@ export default function App() {
 [Login / Select Project]
                   │
                   ▼
-[MySQL Source] → [Test Connection] → [Discovery]
+[Oracle Source] → [Test Connection] → [Discovery]
                   │                         │
                   │                         ▼
                   └──────────────────→ [Inventory + Dependencies]
@@ -1633,10 +1633,10 @@ export default function App() {
                 <button
                   disabled={!pid}
                   onClick={() => {
-                    const profile = prompt("Profile name (MySQL)", "MySQL_Source_1");
+                    const profile = prompt("Profile name (Oracle)", "Oracle_Source_1");
                     const server =
-                      profile && prompt("MySQL Host (e.g. localhost)", "localhost");
-                    const db = server && prompt("MySQL Database / Schema name", "sales");
+                      profile && prompt("Oracle Host (e.g. localhost)", "localhost");
+                    const db = server && prompt("Oracle Service Name / SID (e.g. freepdb1 or FREE)", "freepdb1");
                     if (profile && server && db)
                       action(() =>
                         api(`/projects/${pid}/sources`, {
@@ -1694,7 +1694,7 @@ export default function App() {
                   </tbody>
                 </table>
               ) : (
-                <Empty text="Add a MySQL source connection profile to this project." />
+                <Empty text="Add an Oracle source connection profile to this project." />
               )}
               {discoveryResult && (
                 <pre>{JSON.stringify(discoveryResult, null, 2)}</pre>
@@ -1702,7 +1702,7 @@ export default function App() {
             </Panel>
           )}
           {page === "Discovery" && (
-            <Panel title="MySQL discovery">
+            <Panel title="Oracle discovery">
               {sources.length ? (
                 <div className="action-list">
                   {sources.map((s) => (
@@ -1838,7 +1838,7 @@ export default function App() {
                 <Empty
                   text={
                     inventory.length
-                      ? "All discovered tables are standalone base entities. No foreign key constraints or view dependencies exist in this MySQL database."
+                      ? "All discovered tables are standalone base entities. No foreign key constraints or view dependencies exist in this Oracle database."
                       : "No dependency records captured yet. Run Discovery first."
                   }
                 />
@@ -4808,7 +4808,7 @@ export default function App() {
               {diag ? (
                 <pre>{JSON.stringify(diag, null, 2)}</pre>
               ) : (
-                <Empty text="Run diagnostics to verify MySQL connection, auth mode, Databricks configuration and environment." />
+                <Empty text="Run diagnostics to verify Oracle connection, auth mode, Databricks configuration and environment." />
               )}
             </Panel>
           )}

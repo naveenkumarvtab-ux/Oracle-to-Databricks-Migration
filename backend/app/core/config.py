@@ -8,7 +8,7 @@ ENV_FILE = ROOT_DIR / ".env"
 DEFAULT_DB = ROOT_DIR / "migration_factory.db"
 
 class Settings(BaseSettings):
-    app_name: str = "MySQL to Databricks AI Migration Factory"
+    app_name: str = "Oracle to Databricks AI Migration Factory"
     environment: str = "DEV"
     database_url: str = f"sqlite:///{DEFAULT_DB.as_posix()}"
     jwt_secret: str = "change-me-in-production-minimum-32-characters"
@@ -18,8 +18,16 @@ class Settings(BaseSettings):
     bootstrap_admin_username: str | None = None
     bootstrap_admin_password: str | None = None
 
-    # Source Database Config (MySQL primary, PostgreSQL & SQL Server compatibility)
-    source_type: str = "MYSQL"
+    # Source Database Config (Oracle primary, MySQL, PostgreSQL & SQL Server compatibility)
+    source_type: str = "ORACLE"
+    oracle_host: str | None = "localhost"
+    oracle_port: int = 1521
+    oracle_service_name: str | None = None
+    oracle_sid: str | None = None
+    oracle_username: str | None = "system"
+    oracle_password: str | None = None
+    oracle_schema: str | None = None
+
     mysql_host: str | None = "localhost"
     mysql_port: int = 3306
     mysql_database: str | None = None
