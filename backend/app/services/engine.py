@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 from app.models.entities import *
 from app.models.canonical import MigrationValidation
-from .rules import map_sqlserver_type, map_source_type, classify_layer, classify_procedure, classify_function, classify_trigger, rewrite_common_tsql, rewrite_common_oracle
+from .rules import map_sqlserver_type, map_source_type, classify_layer, classify_procedure, classify_function, classify_trigger, rewrite_common_tsql, rewrite_common_oracle, rewrite_source_sql
 
 def uid(prefix: str) -> str: return f"{prefix}_{uuid.uuid4().hex}"
 def sha(text: str) -> str: return hashlib.sha256(text.encode()).hexdigest()
@@ -308,6 +308,10 @@ def _clean_routine_body(definition: str) -> str:
     body = re.sub(r"\bSET\s+NOCOUNT\s+ON\s*;?", "", body, flags=re.I)
     body = re.sub(r"\bSET\s+ANSI_NULLS\s+(?:ON|OFF)\s*;?", "", body, flags=re.I)
     body = re.sub(r"\bSET\s+QUOTED_IDENTIFIER\s+(?:ON|OFF)\s*;?", "", body, flags=re.I)
+    # Strip DBMS_OUTPUT and unsupported Oracle packages
+    body = re.sub(r"(?is)\bDBMS_OUTPUT\.[A-Za-z0-9_]+\s*(?:\([^)]*\))?\s*;?", "", body)
+    body = re.sub(r"(?is)\b(?:DBMS_LOCK|DBMS_UTILITY|UTL_FILE|UTL_HTTP)\.[A-Za-z0-9_]+\s*(?:\([^)]*\))?\s*;?", "", body)
+    body = re.sub(r"(?im)^\s*NULL\s*;\s*$", "", body)
     # Also strip any leftover dollar tag in case of non-standard end
     body = re.sub(r"^\s*\$[A-Za-z0-9_]*\$\s*", "", body, flags=re.I)
     body = re.sub(r"\s*\$[A-Za-z0-9_]*\$\s*;?\s*$", "", body, flags=re.I)
@@ -332,7 +336,9 @@ def _convert_function(db: Session, project_id: str, o: MigrationObject, m: Migra
     params=_routine_parameters(db,project_id,o.id)
     sig=_parameter_signature(params)
     ft,target=classify_function(definition)
-    rewritten=_replace_known_references(db,project_id,environment,_replace_parameters(rewrite_common_tsql(definition),params))
+    src = db.get(MigrationSource, o.source_id) if hasattr(o, "source_id") and o.source_id else None
+    st = getattr(src, "source_type", "ORACLE") if src else "ORACLE"
+    rewritten=_replace_known_references(db,project_id,environment,_replace_parameters(rewrite_source_sql(definition, st),params))
 
     # Inline table-valued function: RETURN (SELECT ...)
     if ft=="INLINE_TVF":
@@ -348,7 +354,7 @@ def _convert_function(db: Session, project_id: str, o: MigrationObject, m: Migra
     source_ret=(ret_type_match.group(1).strip('[]') if ret_type_match else "string")
     precision=int(ret_type_match.group(2)) if ret_type_match and ret_type_match.group(2) else None
     scale=int(ret_type_match.group(3)) if ret_type_match and ret_type_match.group(3) else None
-    ret_type=map_sqlserver_type(source_ret,precision,scale)
+    ret_type=map_source_type(source_ret,precision,scale,source_type=st)
     body=_clean_routine_body(rewritten)
     mm=re.search(r"\bRETURN\s+(.+?)(?:;\s*$|$)",body,flags=re.I|re.S)
     expr=(mm.group(1).strip() if mm else "")
@@ -369,7 +375,9 @@ def _convert_procedure(db: Session, project_id: str, o: MigrationObject, m: Migr
     sig=_parameter_signature(params,procedure=True)
     intent,target=classify_procedure(definition)
     body=_clean_routine_body(definition)
-    body=_replace_parameters(rewrite_common_tsql(body),params)
+    src = db.get(MigrationSource, o.source_id) if hasattr(o, "source_id") and o.source_id else None
+    st = getattr(src, "source_type", "ORACLE") if src else "ORACLE"
+    body=_replace_parameters(rewrite_source_sql(body, st),params)
     body=_replace_known_references(db,project_id,environment,body)
     body=_rewrite_static_procedure_calls(body)
     low=body.lower()
@@ -387,6 +395,9 @@ def _convert_procedure(db: Session, project_id: str, o: MigrationObject, m: Migr
     clean_body = re.sub(r"(?is)\bBEGIN\s+TRY\b\s*;?", "", clean_body)
     clean_body = re.sub(r"(?is)\bEND\s+TRY\b\s*;?", "", clean_body)
     clean_body = re.sub(r"(?is)\bBEGIN\s+CATCH\b[\s\S]*?\bEND\s+CATCH\b\s*;?", "", clean_body)
+    clean_body = re.sub(r"(?is)\bDBMS_OUTPUT\.[A-Za-z0-9_]+\s*(?:\([^)]*\))?\s*;?", "", clean_body)
+    clean_body = re.sub(r"(?is)\b(?:DBMS_LOCK|DBMS_UTILITY|UTL_FILE|UTL_HTTP)\.[A-Za-z0-9_]+\s*(?:\([^)]*\))?\s*;?", "", clean_body)
+    clean_body = re.sub(r"(?im)^\s*NULL\s*;\s*$", "", clean_body)
     clean_body = clean_body.strip()
 
     low_clean = clean_body.lower()

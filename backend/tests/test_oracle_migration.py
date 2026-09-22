@@ -134,3 +134,18 @@ def test_oracle_type_compatibility_and_projection():
     c_clob = SimpleNamespace(column_name="COMMENTS", data_type="clob", precision=None, scale=None)
     plan = transport_plan(c_clob.data_type)
     assert plan.target_type == "STRING"
+
+
+def test_oracle_procedure_conversion_strips_dbms_output():
+    sql = """
+    PROCEDURE update_sal(p_dept IN VARCHAR2, p_pct IN NUMBER) AS
+    BEGIN
+        UPDATE employees SET salary = salary + (salary * (p_pct / 100)) WHERE department = p_dept;
+        DBMS_OUTPUT.PUT_LINE('Salaries updated: ' || p_dept);
+        NULL;
+    END;
+    """
+    rewritten = rewrite_common_oracle(sql)
+    assert "DBMS_OUTPUT" not in rewritten
+    assert "NULL;" not in rewritten
+

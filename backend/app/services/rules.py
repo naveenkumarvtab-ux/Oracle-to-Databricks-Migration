@@ -423,10 +423,15 @@ def rewrite_common_oracle(sql: str) -> str:
     if not sql:
         return sql
     out = rewrite_recursive_cte(sql)
+    # Remove DBMS_OUTPUT logging statements (PUT_LINE, PUT, NEW_LINE, ENABLE, DISABLE)
+    out = re.sub(r"(?is)\bDBMS_OUTPUT\.[A-Za-z0-9_]+\s*(?:\([^)]*\))?\s*;?", "", out)
+    # Remove other unsupported Oracle DBMS / UTL package calls
+    out = re.sub(r"(?is)\b(?:DBMS_LOCK|DBMS_UTILITY|UTL_FILE|UTL_HTTP)\.[A-Za-z0-9_]+\s*(?:\([^)]*\))?\s*;?", "", out)
     # SYSDATE, SYSTIMESTAMP -> current_timestamp()
     out = re.sub(r"\b(?:SYSDATE|SYSTIMESTAMP)\b", "current_timestamp()", out, flags=re.I)
-    # TRUNC(current_timestamp()) or TRUNC(date) -> to_date(...) or date_trunc
+    # TRUNC(current_timestamp()) or TRUNC(date) -> current_date()
     out = re.sub(r"\bTRUNC\s*\(\s*current_timestamp\(\)\s*\)", "current_date()", out, flags=re.I)
+    out = re.sub(r"\bTRUNC\s*\(\s*SYSDATE\s*\)", "current_date()", out, flags=re.I)
     # NVL(a, b) -> coalesce(a, b)
     out = re.sub(r"\bNVL\s*\(", "coalesce(", out, flags=re.I)
     # NVL2(a, b, c) -> CASE WHEN a IS NOT NULL THEN b ELSE c END
@@ -438,9 +443,8 @@ def rewrite_common_oracle(sql: str) -> str:
     )
     # Double quoted identifiers "MY_COL" -> `MY_COL`
     out = re.sub(r'"([^"]+)"', r"`\1`", out)
-    # FROM DUAL removal (Databricks supports SELECT without FROM or with DUAL)
-    # Convert ROWNUM <= N in WHERE clause to LIMIT N
-    # DECODE(e, s1, r1, def) basic replacement
+    # Standalone NULL statement in PL/SQL
+    out = re.sub(r"(?im)^\s*NULL\s*;\s*$", "", out)
     return out
 
 
